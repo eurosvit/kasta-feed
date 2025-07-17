@@ -17,22 +17,23 @@ API_URL = os.getenv('KEYCRM_API_URL', 'https://openapi.keycrm.app/v1')
 API_KEY = os.getenv('KEYCRM_API_KEY')
 HEADERS = {'Authorization': f'Bearer {API_KEY}'}
 
-# --- Налаштування базових артикулів для групування ---
-# Ключ: (product_id, колір) → значення: спільний артикул для всіх розмірів
+# --- Налаштування спільних артикулів для групування за (product_id, колір) ---
 BASE_ARTICLE_MAP = {
-    # приклад:
+    # Приклад:
     # (123, "Чорний"): "ZN-507",
     # (123, "Бежевий меланж"): "ZN-508",
-    # Додайте свої (product_id, color) → unified_article
+    # Додайте свої комбінації тут...
 }
 
 
 def fetch_all_offers():
     offers, page = [], 1
     while True:
-        res = requests.get(f"{API_URL}/offers",
-                           headers=HEADERS,
-                           params={'page': page, 'limit': 50, 'include': 'product'})
+        res = requests.get(
+            f"{API_URL}/offers",
+            headers=HEADERS,
+            params={'page': page, 'limit': 50, 'include': 'product'}
+        )
         if res.status_code != 200:
             break
         data = res.json().get('data', [])
@@ -49,9 +50,11 @@ def fetch_all_offers():
 def fetch_offer_stock():
     stocks, page = {}, 1
     while True:
-        res = requests.get(f"{API_URL}/offers/stocks",
-                           headers=HEADERS,
-                           params={'page': page, 'limit': 50})
+        res = requests.get(
+            f"{API_URL}/offers/stocks",
+            headers=HEADERS,
+            params={'page': page, 'limit': 50}
+        )
         if res.status_code != 200:
             break
         data = res.json().get('data', [])
@@ -70,9 +73,11 @@ def fetch_offer_stock():
 def fetch_categories():
     cats, page = {}, 1
     while True:
-        res = requests.get(f"{API_URL}/products/categories",
-                           headers=HEADERS,
-                           params={'page': page, 'limit': 50})
+        res = requests.get(
+            f"{API_URL}/products/categories",
+            headers=HEADERS,
+            params={'page': page, 'limit': 50}
+        )
         if res.status_code != 200:
             break
         data = res.json().get('data', [])
@@ -95,15 +100,16 @@ def generate_xml():
     ET.SubElement(shop, "company").text = "Znana Mama"
     ET.SubElement(shop, "url").text = "https://yourshop.ua"
 
+    # Валюти
     ET.SubElement(ET.SubElement(shop, "currencies"), "currency", id="UAH", rate="1")
 
-    # Categories
+    # Категорії
     categories = fetch_categories()
     cats_el = ET.SubElement(shop, "categories")
     for cid, cname in categories.items():
         ET.SubElement(cats_el, "category", id=str(cid)).text = cname
 
-    # Offers
+    # Оферти
     offers_el = ET.SubElement(shop, "offers")
     offers = fetch_all_offers()
     stocks = fetch_offer_stock()
@@ -114,52 +120,58 @@ def generate_xml():
         prod = offer.get("product", {})
         attrs = offer.get("attributes", {})
 
-        # Собі артикул із CRM для stock tracking
-        crm_sku = offer.get("sku") or offer.get("article") or offer.get("vendor_code") or offer.get("code") or f"{oid}"
+        # Оригінальний CRM-артикул (повний, із розміром)
+        crm_sku = (
+            offer.get("sku")
+            or offer.get("article")
+            or offer.get("vendor_code")
+            or offer.get("code")
+            or str(oid)
+        )
 
-        # Збираємо всі властивості
+        # Властивості (properties) з KeyCRM
         props = {p["name"]: p["value"] for p in offer.get("properties", [])}
         color = props.get("Колір", "Не вказано")
-        size = props.get("Розмір", "-")
+        size  = props.get("Розмір", "-")
 
-        # Unified article per color
+        # Визначаємо групуючий артикул <article>:
+        # 1) якщо є у BASE_ARTICLE_MAP → беремо його
+        # 2) інакше обрізаємо суфікс "-<розмір>" з crm_sku
         key = (prod.get("id"), color)
-        grouped_article = BASE_ARTICLE_MAP.get(key, crm_sku)  # fallback до crm_sku
+        if key in BASE_ARTICLE_MAP:
+            grouped_article = BASE_ARTICLE_MAP[key]
+        else:
+            grouped_article = crm_sku.rsplit("-", 1)[0] if "-" in crm_sku else crm_sku
 
-        # Основні поля
-        name = prod.get("name") or offer.get("name") or f"Offer {oid}"
-        desc = prod.get("description") or offer.get("description") or "Опис відсутній"
-        price = offer.get("price", 0)
-        currency = attrs.get("currency_code", "UAH")
-        vendor = prod.get("vendor") or prod.get("vendor_name") or "Znana Mama"
-        cat_id = prod.get("category_id")
-
+        # Початкові теги offer
         offer_el = ET.SubElement(
             offers_el, "offer",
-            id=str(oid), available="true" if qty > 0 else "false"
+            id=str(oid),
+            available="true" if qty > 0 else "false"
         )
-        ET.SubElement(offer_el, "name").text = name
-        ET.SubElement(offer_el, "price").text = str(price)
-        ET.SubElement(offer_el, "currencyId").text = currency
+        ET.SubElement(offer_el, "name").text        = prod.get("name") or offer.get("name") or f"Offer {oid}"
+        ET.SubElement(offer_el, "price").text       = str(offer.get("price", 0))
+        ET.SubElement(offer_el, "currencyId").text  = attrs.get("currency_code", "UAH")
         ET.SubElement(offer_el, "stock_quantity").text = str(qty)
-        if cat_id and cat_id in categories:
+        if cat_id := prod.get("category_id"):
             ET.SubElement(offer_el, "categoryId").text = str(cat_id)
         if thumb := offer.get("thumbnail_url"):
             ET.SubElement(offer_el, "picture").text = thumb
-        ET.SubElement(offer_el, "description").text = desc
-        ET.SubElement(offer_el, "vendor").text = vendor
+        ET.SubElement(offer_el, "description").text = prod.get("description") or offer.get("description") or "Опис відсутній"
+        ET.SubElement(offer_el, "vendor").text      = prod.get("vendor") or prod.get("vendor_name") or "Znana Mama"
 
-        # Групуючий артикул для Kasta
-        ET.SubElement(offer_el, "article").text = grouped_article
-        # Оригінальний артикул з CRM для вашого обліку
-        ET.SubElement(offer_el, "vendorCode").text = crm_sku
+        # Вставляємо артикули
+        ET.SubElement(offer_el, "article").text    = grouped_article  # однаковий для всіх розмірів одного кольору
+        ET.SubElement(offer_el, "vendorCode").text = crm_sku          # реальний арт. з CRM
 
-        # Інші параметри крім Розміру
+        # Додаємо параметри без дублів
+        seen = set()
         for pname, pvalue in props.items():
-            if pname == "Розмір":
+            if pname == "Розмір" or pname in seen:
                 continue
             ET.SubElement(offer_el, "param", name=pname).text = pvalue
-        # Єдиний параметр Розмір
+            seen.add(pname)
+        # Додаємо параметр Розмір лише один раз
         ET.SubElement(offer_el, "param", name="Розмір").text = size
 
     return ET.tostring(root, encoding="utf-8")
