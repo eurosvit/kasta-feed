@@ -8,9 +8,11 @@ import time
 
 app = Flask(__name__)
 
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Env config
 API_URL = os.getenv('KEYCRM_API_URL', 'https://openapi.keycrm.app/v1')
 API_KEY = os.getenv('KEYCRM_API_KEY')
 HEADERS = {'Authorization': f'Bearer {API_KEY}'}
@@ -18,11 +20,9 @@ HEADERS = {'Authorization': f'Bearer {API_KEY}'}
 def fetch_all_offers():
     offers, page = [], 1
     while True:
-        res = requests.get(
-            f"{API_URL}/offers",
-            headers=HEADERS,
-            params={'page': page, 'limit': 50, 'include': 'product'}
-        )
+        res = requests.get(f"{API_URL}/offers",
+                           headers=HEADERS,
+                           params={'page': page, 'limit': 50, 'include': 'product'})
         if res.status_code != 200:
             break
         data = res.json().get('data', [])
@@ -38,19 +38,18 @@ def fetch_all_offers():
 def fetch_offer_stock():
     stocks, page = {}, 1
     while True:
-        res = requests.get(
-            f"{API_URL}/offers/stocks",
-            headers=HEADERS,
-            params={'page': page, 'limit': 50}
-        )
+        res = requests.get(f"{API_URL}/offers/stocks",
+                           headers=HEADERS,
+                           params={'page': page, 'limit': 50})
         if res.status_code != 200:
             break
-        for entry in res.json().get('data', []):
-            oid = entry.get('offer_id')
-            qty = entry.get('quantity', 0)
+        entries = res.json().get('data', [])
+        for e in entries:
+            oid = e.get('offer_id')
+            qty = e.get('quantity', 0)
             if oid is not None:
                 stocks[oid] = qty
-        if len(res.json().get('data', [])) < 50:
+        if len(entries) < 50:
             break
         page += 1
         time.sleep(0.1)
@@ -59,18 +58,17 @@ def fetch_offer_stock():
 def fetch_categories():
     cats, page = {}, 1
     while True:
-        res = requests.get(
-            f"{API_URL}/products/categories",
-            headers=HEADERS,
-            params={'page': page, 'limit': 50}
-        )
+        res = requests.get(f"{API_URL}/products/categories",
+                           headers=HEADERS,
+                           params={'page': page, 'limit': 50})
         if res.status_code != 200:
             break
-        for c in res.json().get('data', []):
+        data = res.json().get('data', [])
+        for c in data:
             cid, name = c.get('id'), c.get('name')
             if cid and name:
                 cats[cid] = name
-        if len(res.json().get('data', [])) < 50:
+        if len(data) < 50:
             break
         page += 1
         time.sleep(0.1)
@@ -83,24 +81,27 @@ def generate_xml():
     ET.SubElement(shop, "name").text = "Znana Mama"
     ET.SubElement(shop, "company").text = "Znana Mama"
     ET.SubElement(shop, "url").text = "https://yourshop.ua"
+
     ET.SubElement(ET.SubElement(shop, "currencies"), "currency", id="UAH", rate="1")
 
+    # Категорії
     categories = fetch_categories()
     cats_el = ET.SubElement(shop, "categories")
     for cid, cname in categories.items():
         ET.SubElement(cats_el, "category", id=str(cid)).text = cname
 
+    # Оферти
     offers_el = ET.SubElement(shop, "offers")
     offers = fetch_all_offers()
     stocks = fetch_offer_stock()
 
     for offer in offers:
-        oid = offer.get("id")
+        oid = offer["id"]
         qty = stocks.get(oid, offer.get("quantity", 0))
         prod = offer.get("product", {})
         attrs = offer.get("attributes", {})
 
-        # Оригінальний CRM-артикул (зі суфіксом розміру)
+        # Повний CRM-артикул (для vendorCode)
         crm_sku = (
             offer.get("sku")
             or offer.get("article")
@@ -109,18 +110,19 @@ def generate_xml():
             or str(oid)
         )
 
-        # Властивості
+        # Збираємо властивості
         props = {p["name"]: p["value"] for p in offer.get("properties", [])}
         color = props.get("Колір", "Не вказано")
         size  = props.get("Розмір", "-")
 
-        # Групуючий артикул: відрізаємо все після останнього "-"
-        grouped_article = crm_sku.rsplit("-", 1)[0] if "-" in crm_sku else crm_sku
+        # Групуючий артикул: ZN-<product_id>
+        grouped_article = f"ZN-{prod.get('id')}"
 
-        # Формуємо <offer>
+        # Формуємо offer
         offer_el = ET.SubElement(
             offers_el, "offer",
-            id=str(oid), available="true" if qty > 0 else "false"
+            id=str(oid),
+            available="true" if qty > 0 else "false"
         )
         ET.SubElement(offer_el, "name").text        = prod.get("name") or offer.get("name") or f"Offer {oid}"
         ET.SubElement(offer_el, "price").text       = str(offer.get("price", 0))
@@ -133,9 +135,9 @@ def generate_xml():
         ET.SubElement(offer_el, "description").text = prod.get("description") or offer.get("description") or "Опис відсутній"
         ET.SubElement(offer_el, "vendor").text      = prod.get("vendor") or prod.get("vendor_name") or "Znana Mama"
 
-        # Вставляємо артикули
-        ET.SubElement(offer_el, "article").text    = grouped_article  # чотири однакові на колір
-        ET.SubElement(offer_el, "vendorCode").text = crm_sku          # первинний арт. з CRM
+        # Артикул і vendorCode
+        ET.SubElement(offer_el, "article").text    = grouped_article
+        ET.SubElement(offer_el, "vendorCode").text = crm_sku
 
         # Параметри без дублів
         seen = set()
@@ -144,7 +146,7 @@ def generate_xml():
                 continue
             ET.SubElement(offer_el, "param", name=pname).text = pvalue
             seen.add(pname)
-        # І параметр Розмір
+        # І один параметр Розмір
         ET.SubElement(offer_el, "param", name="Розмір").text = size
 
     return ET.tostring(root, encoding="utf-8")
